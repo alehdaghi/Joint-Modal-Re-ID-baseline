@@ -196,6 +196,27 @@ class fusion_function_concat(nn.Module): # concat the features and
     def count_params(self):
         return count_parameters(self.fusionBlock)
 
+class fusion_function_concat_small(nn.Module): # concat the features and
+    def __init__(self, size):
+        super(fusion_function_concat_small, self).__init__()
+        layers = [
+            nn.Conv2d(2*size, size, kernel_size=1, stride=1, padding=0,
+                      bias=False),
+            nn.BatchNorm2d(size),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=1, stride=1, padding=0)
+        ]
+        self.fusionBlock = nn.Sequential(*layers)
+
+    def forward(self, x1, x2):
+        x = torch.cat((x1, x2), 1)
+        x = self.fusionBlock(x)
+        return x
+
+    def count_params(self):
+        return count_parameters(self.fusionBlock)
+
+
 class fusion_function_add(nn.Module):
     def __init__(self):
         super(fusion_function_add, self).__init__()
@@ -250,7 +271,7 @@ class embed_net(nn.Module):
         self.gm_pool = gm_pool
 
         if (self.fusion_function == 'cat'):
-            self.fusionBlock = fusion_function_concat(self.resnet50_layer_size[self.fusion_layer])
+            self.fusionBlock = fusion_function_concat_small(self.resnet50_layer_size[self.fusion_layer])
         else:
             self.fusionBlock = fusion_function_add()
 
