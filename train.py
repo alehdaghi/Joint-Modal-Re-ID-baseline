@@ -18,6 +18,8 @@ from utils import *
 from loss import OriTripletLoss, TripletLoss_WRT
 from tensorboardX import SummaryWriter
 
+TEST_TYPE = 0 # 0 Fusion, 1: Color, 2:Thermal
+
 parser = argparse.ArgumentParser(description='PyTorch Cross-Modality Training')
 parser.add_argument('--dataset', default='sysu', help='dataset name: regdb or sysu]')
 parser.add_argument('--lr', default=0.1 , type=float, help='learning rate, 0.00035 for adam')
@@ -35,7 +37,7 @@ parser.add_argument('--log_path', default='log/', type=str,
                     help='log save path')
 parser.add_argument('--vis_log_path', default='log/vis_log/', type=str,
                     help='log save path')
-parser.add_argument('--workers', default=4, type=int, metavar='N',
+parser.add_argument('--workers', default=0, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--img_w', default=144, type=int,
                     metavar='imgw', help='img width')
@@ -45,7 +47,7 @@ parser.add_argument('--batch-size', default=8, type=int,
                     metavar='B', help='training batch size')
 parser.add_argument('--test-batch', default=64, type=int,
                     metavar='tb', help='testing batch size')
-parser.add_argument('--method', default='agw', type=str,
+parser.add_argument('--method', default='base', type=str,
                     metavar='m', help='method type: base or agw')
 parser.add_argument('--margin', default=0.3, type=float,
                     metavar='margin', help='triplet loss margin')
@@ -55,9 +57,12 @@ parser.add_argument('--trial', default=1, type=int,
                     metavar='t', help='trial (only for RegDB dataset)')
 parser.add_argument('--seed', default=0, type=int,
                     metavar='t', help='random seed')
-parser.add_argument('--gpu', default='0', type=str,
+parser.add_argument('--gpu', default='', type=str,
                     help='gpu device ids for CUDA_VISIBLE_DEVICES')
 parser.add_argument('--mode', default='all', type=str, help='all or indoor')
+parser.add_argument('--fusion_layer', default=0, type=int,
+                    help='the layer fro which the fusion function applied')
+parser.add_argument('--fusion_function', default='cat', type=str, help='cat or add')
 
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -66,7 +71,7 @@ set_seed(args.seed)
 
 dataset = args.dataset
 if dataset == 'sysu':
-    data_path = '../Datasets/SYSU-MM01/ori_data/'
+    data_path = '../Datasets/SYSU-MM01/'
     log_path = args.log_path + 'sysu_log/'
     test_mode = [1, 2]  # thermal to visible
 elif dataset == 'regdb':
@@ -96,6 +101,11 @@ if not args.optim == 'sgd':
 if dataset == 'regdb':
     suffix = suffix + '_trial_{}'.format(args.trial)
 
+suffix = suffix + '_'+args.fusion_function+str(args.fusion_layer)
+if TEST_TYPE == 1 :
+    suffix = suffix + '_Color'
+elif TEST_TYPE == 2:
+    suffix = suffix + '_Thermal'
 sys.stdout = Logger(log_path + suffix + '_os.txt')
 
 vis_log_dir = args.vis_log_path + suffix + '/'
@@ -127,36 +137,22 @@ transform_test = transforms.Compose([
 ])
 
 end = time.time()
+
+gallset = None
+queryset = None
+
 if dataset == 'sysu':
     # training set
-    trainset = SYSUData(data_path, transform=transform_train)
+    trainset = SYSUData(data_path, transform=transform_train, modality=TEST_TYPE)
     # generate the idx of each person identity
-    color_pos, thermal_pos = GenIdx(trainset.train_color_label, trainset.train_thermal_label)
-
-    # testing set
-    query_img, query_label, query_cam = process_query_sysu(data_path, mode=args.mode)
-    gall_img, gall_label, gall_cam = process_gallery_sysu(data_path, mode=args.mode, trial=0)
 
 elif dataset == 'regdb':
     # training set
     trainset = RegDBData(data_path, args.trial, transform=transform_train)
-    # generate the idx of each person identity
-    color_pos, thermal_pos = GenIdx(trainset.train_color_label, trainset.train_thermal_label)
-
-    # testing set
-    query_img, query_label = process_test_regdb(data_path, trial=args.trial, modal='visible')
-    gall_img, gall_label = process_test_regdb(data_path, trial=args.trial, modal='thermal')
-
-gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
 
 # testing data loader
-gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
-query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
 
 n_class = len(np.unique(trainset.train_color_label))
-nquery = len(query_label)
-ngall = len(gall_label)
 
 print('Dataset {} statistics:'.format(dataset))
 print('  ------------------------------')
@@ -165,16 +161,18 @@ print('  ------------------------------')
 print('  visible  | {:5d} | {:8d}'.format(n_class, len(trainset.train_color_label)))
 print('  thermal  | {:5d} | {:8d}'.format(n_class, len(trainset.train_thermal_label)))
 print('  ------------------------------')
-print('  query    | {:5d} | {:8d}'.format(len(np.unique(query_label)), nquery))
-print('  gallery  | {:5d} | {:8d}'.format(len(np.unique(gall_label)), ngall))
+#print('  query    | {:5d} | {:8d}'.format(len(np.unique(query_label)), nquery))
+#print('  gallery  | {:5d} | {:8d}'.format(len(np.unique(gall_label)), ngall))
 print('  ------------------------------')
 print('Data Loading Time:\t {:.3f}'.format(time.time() - end))
 
 print('==> Building model..')
 if args.method =='base':
-    net = embed_net(n_class, no_local= 'off', gm_pool =  'off', arch=args.arch)
+    net = embed_net(n_class, no_local= 'off', gm_pool =  'off', arch=args.arch,
+                    fusion_layer=args.fusion_layer, fusion_function=args.fusion_function)
 else:
-    net = embed_net(n_class, no_local= 'on', gm_pool = 'on', arch=args.arch)
+    net = embed_net(n_class, no_local= 'on', gm_pool = 'on', arch=args.arch,
+                    fusion_layer=args.fusion_layer, fusion_function=args.fusion_function)
 net.to(device)
 cudnn.benchmark = True
 
@@ -182,7 +180,7 @@ if len(args.resume) > 0:
     model_path = checkpoint_path + args.resume
     if os.path.isfile(model_path):
         print('==> loading checkpoint {}'.format(args.resume))
-        checkpoint = torch.load(model_path)
+        checkpoint = torch.load(model_path, map_location='cpu')
         start_epoch = checkpoint['epoch']
         net.load_state_dict(checkpoint['net'])
         print('==> loaded checkpoint {} (epoch {})'
@@ -234,7 +232,6 @@ def adjust_learning_rate(optimizer, epoch):
 
 
 def train(epoch):
-
     current_lr = adjust_learning_rate(optimizer, epoch)
     train_loss = AverageMeter()
     id_loss = AverageMeter()
@@ -248,18 +245,20 @@ def train(epoch):
     net.train()
     end = time.time()
 
-    for batch_idx, (input1, input2, label1, label2) in enumerate(trainloader):
+    for batch_idx, (input1, input2, label1, label2, _, _, _1, _2) in enumerate(trainloader):
 
-        labels = torch.cat((label1, label2), 0)
+        labels = label1#torch.cat((label1, label2), 0)
+        if torch.cuda.is_available():
+            if TEST_TYPE == 0 or TEST_TYPE == 1:
+                input1 = Variable(input1.cuda())
+            if TEST_TYPE == 0 or TEST_TYPE == 2:
+                input2 = Variable(input2.cuda())
+            labels = Variable(labels.cuda())
 
-        input1 = Variable(input1.cuda())
-        input2 = Variable(input2.cuda())
-
-        labels = Variable(labels.cuda())
         data_time.update(time.time() - end)
 
 
-        feat, out0, = net(input1, input2)
+        feat, out0, = net(input1, input2, TEST_TYPE)
 
         loss_id = criterion_id(out0, labels)
         loss_tri, batch_acc = criterion_tri(feat, labels)
@@ -300,20 +299,48 @@ def train(epoch):
 
 
 def test(epoch):
+    if dataset == 'sysu':
+        queryset = SYSUData(data_path, dataFile='test', num_pos = 1, transform=transform_train,
+                            isQG=True, colorCam=[1, 4], irCam=[6], modality=TEST_TYPE)
+        gallset = SYSUData(data_path, dataFile='test', num_pos = 1, transform=transform_train,
+                           isQG=True, colorCam=[2, 5], irCam=[3], modality=TEST_TYPE)
+    elif dataset == 'regdb':
+        queryset = RegDBData(data_path, args.trial, transform=transform_train, name='joint/query', isQG=True)
+        gallset = RegDBData(data_path, args.trial, transform=transform_train, name='joint/gallery', isQG=True)
+
     # switch to evaluation mode
     net.eval()
     print('Extracting Gallery Feature...')
     start = time.time()
     ptr = 0
-    gall_feat = np.zeros((ngall, 2048))
-    gall_feat_att = np.zeros((ngall, 2048))
+
+
+    gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, drop_last=False, num_workers=args.workers )
+    query_loader = data.DataLoader(queryset, batch_size=args.test_batch, drop_last=True, num_workers=args.workers )
+
+    gall_feat = np.empty((0, 2048))
+    gall_feat_att = np.empty((0, 2048))
+    gall_label = np.empty(0)
+    gall_cam = np.empty(0)
+
     with torch.no_grad():
-        for batch_idx, (input, label) in enumerate(gall_loader):
-            batch_num = input.size(0)
-            input = Variable(input.cuda())
-            feat, feat_att = net(input, input, test_mode[0])
-            gall_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
-            gall_feat_att[ptr:ptr + batch_num, :] = feat_att.detach().cpu().numpy()
+        for batch_idx, (input1, input2, label1, label2, _, _, _1, _2) in enumerate(gall_loader):
+            batch_num = input1.size(0)
+
+            if torch.cuda.is_available():
+                if TEST_TYPE == 0 or TEST_TYPE == 1:
+                    input1 = Variable(input1.cuda())
+                if TEST_TYPE == 0 or TEST_TYPE == 2:
+                    input2 = Variable(input2.cuda())
+
+
+            feat, feat_att = net(input1, input2, TEST_TYPE)
+
+            #input = Variable(input.cuda())
+            gall_feat = np.append(gall_feat, feat.detach().cpu().numpy(), axis=0)
+            gall_feat_att = np.append(gall_feat_att, feat_att.detach().cpu().numpy(), axis=0)
+            gall_label = np.append(gall_label, label1, axis=0)
+            gall_cam = np.append(gall_cam, -1 * _, axis=0)
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
 
@@ -322,15 +349,26 @@ def test(epoch):
     print('Extracting Query Feature...')
     start = time.time()
     ptr = 0
-    query_feat = np.zeros((nquery, 2048))
-    query_feat_att = np.zeros((nquery, 2048))
+    query_feat = np.empty((0, 2048))
+    query_feat_att = np.empty((0, 2048))
+    query_label = np.empty(0)
+    query_cam = np.empty(0)
+
     with torch.no_grad():
-        for batch_idx, (input, label) in enumerate(query_loader):
-            batch_num = input.size(0)
-            input = Variable(input.cuda())
-            feat, feat_att = net(input, input, test_mode[1])
-            query_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
-            query_feat_att[ptr:ptr + batch_num, :] = feat_att.detach().cpu().numpy()
+        for batch_idx, (input1, input2, label1, label2, _, _, _1, _2) in enumerate(query_loader):
+            batch_num = input1.size(0)
+            if torch.cuda.is_available():
+                if TEST_TYPE == 0 or TEST_TYPE == 1:
+                    input1 = Variable(input1.cuda())
+                if TEST_TYPE == 0 or TEST_TYPE == 2:
+                    input2 = Variable(input2.cuda())
+
+            feat, feat_att = net(input1, input2, TEST_TYPE)
+            query_feat = np.append(query_feat, feat.detach().cpu().numpy(), axis=0)
+            query_feat_att = np.append(query_feat_att, feat_att.detach().cpu().numpy(), axis=0)
+            query_label = np.append(query_label, label1, axis=0)
+            query_cam = np.append(query_cam, -1*_, axis=0)
+
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
 
@@ -363,12 +401,7 @@ for epoch in range(start_epoch, 81 - start_epoch):
 
     print('==> Preparing Data Loader...')
     # identity sampler
-    sampler = IdentitySampler(trainset.train_color_label, \
-                              trainset.train_thermal_label, color_pos, thermal_pos, args.num_pos, args.batch_size,
-                              epoch)
 
-    trainset.cIndex = sampler.index1  # color index
-    trainset.tIndex = sampler.index2  # thermal index
     print(epoch)
     print(trainset.cIndex)
     print(trainset.tIndex)
@@ -376,12 +409,12 @@ for epoch in range(start_epoch, 81 - start_epoch):
     loader_batch = args.batch_size * args.num_pos
 
     trainloader = data.DataLoader(trainset, batch_size=loader_batch, \
-                                  sampler=sampler, num_workers=args.workers, drop_last=True)
+                                   num_workers=args.workers, drop_last=True, shuffle= False)
 
     # training
     train(epoch)
 
-    if epoch > 0 and epoch % 2 == 0:
+    if epoch >= 0 and epoch % 2 == 0:
         print('Test Epoch: {}'.format(epoch))
 
         # testing

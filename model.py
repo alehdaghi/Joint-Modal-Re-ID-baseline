@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from torch.nn import init
 from resnet import resnet50, resnet18
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 class Normalize(nn.Module):
     def __init__(self, power=2):
@@ -91,9 +93,9 @@ def weights_init_classifier(m):
 
 
 class visible_module(nn.Module):
-    def __init__(self, arch='resnet50'):
+    def __init__(self, fusion_layer=1, arch='resnet50'):
         super(visible_module, self).__init__()
-
+        self.fusion_layer = fusion_layer
         model_v = resnet50(pretrained=True,
                            last_conv_stride=1, last_conv_dilation=1)
         # avg pooling to global pooling
@@ -104,13 +106,26 @@ class visible_module(nn.Module):
         x = self.visible.bn1(x)
         x = self.visible.relu(x)
         x = self.visible.maxpool(x)
+        if self.fusion_layer >= 1:
+            for i in range(0, self.fusion_layer):
+                x = self.visible.layers[i](x)
         return x
+
+    def count_params(self):
+        s = count_parameters(self.visible.conv1) + \
+            count_parameters(self.visible.bn1) + \
+            count_parameters(self.visible.relu) + \
+            count_parameters(self.visible.maxpool)
+        if self.fusion_layer >= 1:
+            for i in range(0, self.fusion_layer):
+                s = s + count_parameters(self.visible.layers[i])
+        return s
 
 
 class thermal_module(nn.Module):
-    def __init__(self, arch='resnet50'):
+    def __init__(self, fusion_layer=1, arch='resnet50'):
         super(thermal_module, self).__init__()
-
+        self.fusion_layer = fusion_layer
         model_t = resnet50(pretrained=True,
                            last_conv_stride=1, last_conv_dilation=1)
         # avg pooling to global pooling
@@ -121,13 +136,27 @@ class thermal_module(nn.Module):
         x = self.thermal.bn1(x)
         x = self.thermal.relu(x)
         x = self.thermal.maxpool(x)
+        if self.fusion_layer >= 1:
+            for i in range(0, self.fusion_layer):
+                x = self.thermal.layers[i](x)
+
         return x
+
+    def count_params(self):
+        s = count_parameters(self.thermal.conv1) + \
+            count_parameters(self.thermal.bn1) + \
+            count_parameters(self.thermal.relu) + \
+            count_parameters(self.thermal.maxpool)
+        if self.fusion_layer >= 1:
+            for i in range(0, self.fusion_layer):
+                s = s + count_parameters(self.thermal.layers[i])
+        return s
 
 
 class base_resnet(nn.Module):
-    def __init__(self, arch='resnet50'):
+    def __init__(self, fusion_layer=1, arch='resnet50'):
         super(base_resnet, self).__init__()
-
+        self.fusion_layer = fusion_layer
         model_base = resnet50(pretrained=True,
                               last_conv_stride=1, last_conv_dilation=1)
         # avg pooling to global pooling
@@ -135,20 +164,61 @@ class base_resnet(nn.Module):
         self.base = model_base
 
     def forward(self, x):
-        x = self.base.layer1(x)
-        x = self.base.layer2(x)
-        x = self.base.layer3(x)
-        x = self.base.layer4(x)
+        #x = self.base.layer1(x)
+        for i in range(self.fusion_layer, 4):
+            x = self.base.layers[i](x)
+        #x = self.base.layer3(x)
+        #x = self.base.layer4(x)
         return x
+    def count_params(self):
+        s = 0
+        for i in range(self.fusion_layer, 4):
+            s = s + count_parameters(self.base.layers[i])
+        return s
+
+class fusion_function_concat(nn.Module): # concat the features and
+    def __init__(self, size):
+        super(fusion_function_concat, self).__init__()
+        layers = [
+            nn.Conv2d(2*size, size, kernel_size=7, stride=2, padding=3,
+                      bias=False),
+            nn.BatchNorm2d(size),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        ]
+        self.fusionBlock = nn.Sequential(*layers)
+
+    def forward(self, x1, x2):
+        x = torch.cat((x1, x2), 1)
+        x = self.fusionBlock(x)
+        return x
+
+    def count_params(self):
+        return count_parameters(self.fusionBlock)
+
+class fusion_function_add(nn.Module):
+    def __init__(self):
+        super(fusion_function_add, self).__init__()
+
+    def forward(self, x1, x2):
+        return x1 + x2
+
+    def count_params(self):
+        return 0
+
 
 
 class embed_net(nn.Module):
-    def __init__(self,  class_num, no_local= 'on', gm_pool = 'on', arch='resnet50'):
+    def __init__(self,  class_num, no_local= 'on', gm_pool = 'on', arch='resnet50',
+                 fusion_layer=1, fusion_function='cat'):
+        self.fusion_layer = fusion_layer
+        self.fusion_function = fusion_function
+        self.resnet50_layer_size = [64, 256, 512, 1024, 2048]
         super(embed_net, self).__init__()
 
-        self.thermal_module = thermal_module(arch=arch)
-        self.visible_module = visible_module(arch=arch)
-        self.base_resnet = base_resnet(arch=arch)
+        self.thermal_module = thermal_module(arch=arch, fusion_layer=fusion_layer)
+        self.visible_module = visible_module(arch=arch, fusion_layer=fusion_layer)
+        self.base_resnet = base_resnet(arch=arch, fusion_layer=fusion_layer)
         self.non_local = no_local
         if self.non_local =='on':
             layers=[3, 4, 6, 3]
@@ -179,11 +249,17 @@ class embed_net(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.gm_pool = gm_pool
 
+        if (self.fusion_function == 'cat'):
+            self.fusionBlock = fusion_function_concat(self.resnet50_layer_size[self.fusion_layer])
+        else:
+            self.fusionBlock = fusion_function_add()
+
+
     def forward(self, x1, x2, modal=0):
         if modal == 0:
             x1 = self.visible_module(x1)
             x2 = self.thermal_module(x2)
-            x = torch.cat((x1, x2), 0)
+            x = self.fusionBlock(x1, x2)
         elif modal == 1:
             x = self.visible_module(x1)
         elif modal == 2:
@@ -243,3 +319,9 @@ class embed_net(nn.Module):
             return x_pool, self.classifier(feat)
         else:
             return self.l2norm(x_pool), self.l2norm(feat)
+
+    def count_params(self):
+        return self.visible_module.count_params() +\
+               self.thermal_module.count_params() +\
+               self.fusionBlock.count_params() + \
+               self.base_resnet.count_params()

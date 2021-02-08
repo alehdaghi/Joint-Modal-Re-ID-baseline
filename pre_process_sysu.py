@@ -3,26 +3,27 @@ from PIL import Image
 import pdb
 import os
 
-data_path = '/home/datasets/prml/computervision/re-id/sysu-mm01/ori_data'
+data_path = '../Datasets/SYSU-MM01/'
 
 rgb_cameras = ['cam1','cam2','cam4','cam5']
 ir_cameras = ['cam3','cam6']
 
+data = 'train'
 # load id info
-file_path_train = os.path.join(data_path,'exp/train_id.txt')
-file_path_val   = os.path.join(data_path,'exp/val_id.txt')
+file_path_train = os.path.join(data_path,'exp/'+data+'_id.txt')
+#file_path_val   = os.path.join(data_path,'exp/val_id.txt')
 with open(file_path_train, 'r') as file:
     ids = file.read().splitlines()
     ids = [int(y) for y in ids[0].split(',')]
     id_train = ["%04d" % x for x in ids]
     
-with open(file_path_val, 'r') as file:
-    ids = file.read().splitlines()
-    ids = [int(y) for y in ids[0].split(',')]
-    id_val = ["%04d" % x for x in ids]
+#with open(file_path_val, 'r') as file:
+#    ids = file.read().splitlines()
+#    ids = [int(y) for y in ids[0].split(',')]
+#    id_val = ["%04d" % x for x in ids]
     
 # combine train and val split   
-id_train.extend(id_val) 
+#id_train.extend(id_val)
 
 files_rgb = []
 files_ir = []
@@ -50,6 +51,7 @@ fix_image_height = 288
 def read_imgs(train_image):
     train_img = []
     train_label = []
+    train_camera = []
     for img_path in train_image:
         # img
         img = Image.open(img_path)
@@ -62,14 +64,21 @@ def read_imgs(train_image):
         pid = int(img_path[-13:-9])
         pid = pid2label[pid]
         train_label.append(pid)
-    return np.array(train_img), np.array(train_label)
+
+        cid = int(img_path[-15:-14])
+        train_camera.append(cid)
+    return np.array(train_img), np.array(train_label), np.array(train_camera)
        
 # rgb imges
-train_img, train_label = read_imgs(files_rgb)
-np.save(data_path + 'train_rgb_resized_img.npy', train_img)
-np.save(data_path + 'train_rgb_resized_label.npy', train_label)
+train_img, train_label, train_camera = read_imgs(files_rgb)
+np.save(data_path + data+'_rgb_resized_img.npy', train_img)
+np.save(data_path + data+'_rgb_resized_label.npy', train_label)
+np.save(data_path + data+'_rgb_resized_camera.npy', train_camera)
+np.save(data_path + data+'_rgb_path.npy', np.array(files_rgb))
 
 # ir imges
-train_img, train_label = read_imgs(files_ir)
-np.save(data_path + 'train_ir_resized_img.npy', train_img)
-np.save(data_path + 'train_ir_resized_label.npy', train_label)
+train_img, train_label, train_camera = read_imgs(files_ir)
+np.save(data_path + data+'_ir_resized_img.npy', train_img)
+np.save(data_path + data+'_ir_resized_label.npy', train_label)
+np.save(data_path + data+'_ir_resized_camera.npy', train_camera)
+np.save(data_path + data+'_ir_path.npy', np.array(files_ir))
